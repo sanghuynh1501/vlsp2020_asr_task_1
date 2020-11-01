@@ -36,7 +36,7 @@ END_TOKEN = '<end>'
 START_TOKEN = '<start>'
 
 d_model = 256
-batch_size = 8
+batch_size = 4
 
 train_data = HDF5DatasetGenerator('train.hdf5', batch_size, 1000)
 test_data = HDF5DatasetGenerator('test.hdf5', batch_size, 1000)
@@ -241,7 +241,7 @@ def test_audios_sample(audios, tar, length):
     enc_padding_mask, combined_mask, dec_padding_mask = create_masks(audios, tar_inp, length)
 
     ctc_output, predictions, _ = transformer(audios, tar_inp,
-                                             True,
+                                             False,
                                              enc_padding_mask,
                                              combined_mask,
                                              dec_padding_mask)
@@ -286,6 +286,8 @@ def padding_data(audios, labels, audio_len, text_len):
     while audios_batch.shape[1] < max_text_len:
         padding = np.zeros((audios.shape[0], 1, audios.shape[2]))
         audios_batch = np.concatenate([audios_batch, padding], 1)
+
+    audios_batch = np.expand_dims(audios_batch, -1)
 
     return audios_batch, labels_batch
 

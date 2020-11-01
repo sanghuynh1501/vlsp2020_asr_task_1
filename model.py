@@ -179,6 +179,66 @@ class DecoderLayer(tf.keras.layers.Layer):
         return out3, attn_weights_block1, attn_weights_block2
 
 
+class TwoD_Attention_layer(tf.keras.layers.Layer):
+    def __init__(self,n = 64,c =64):
+        super(TwoD_Attention_layer, self).__init__()
+        self.n = n
+        self.c = c
+        self.convq = tf.keras.layers.Conv2D(c, 3, 1, 'same', kernel_initializer='glorot_normal')
+        self.convk = tf.keras.layers.Conv2D(c, 3, 1, 'same', kernel_initializer='glorot_normal')
+        self.convv = tf.keras.layers.Conv2D(c, 3, 1, 'same', kernel_initializer='glorot_normal')
+        self.conv = tf.keras.layers.Conv2D(n, 3, 1, 'same', kernel_initializer='glorot_normal')
+        self.bnq = tf.keras.layers.BatchNormalization()
+        self.bnk = tf.keras.layers.BatchNormalization()
+        self.bnv = tf.keras.layers.BatchNormalization()
+        self.ln = tf.keras.layers.LayerNormalization()
+
+        self.final_conv1 = tf.keras.layers.Conv2D(n, 3, 1, 'same', activation='relu',
+                                                  kernel_initializer='glorot_normal')
+        self.final_conv2 = tf.keras.layers.Conv2D(n, 3, 1, 'same', kernel_initializer='glorot_normal')
+        self.bnf1 = tf.keras.layers.BatchNormalization()
+        self.bnf2 = tf.keras.layers.BatchNormalization()
+        self.act = tf.keras.layers.Activation('relu')
+
+    def call(self,inputs,training):
+        '''
+        :param inputs: B*T*D*n
+        :return: B*T*D*n
+        '''
+        residual = inputs
+        batch_size = tf.shape(inputs)[0]
+        q = self.bnq(self.convq(inputs),training=training)
+        k = self.bnk(self.convk(inputs),training=training)
+        v = self.bnv(self.convv(inputs),training=training)
+
+        q_time = tf.transpose(q,[0,3,1,2])
+        k_time = tf.transpose(k, [0, 3, 1, 2])
+        v_time = tf.transpose(v, [0, 3, 1, 2])
+
+        q_fre = tf.transpose(q,[0,3,2,1])
+        k_fre = tf.transpose(k, [0, 3, 2, 1])
+        v_fre = tf.transpose(v, [0, 3, 2, 1])
+
+        scaled_attention_time, attention_weights_time = scaled_dot_product_attention(
+            q_time, k_time, v_time, None)  # B*c*T*D
+        scaled_attention_fre, attention_weights_fre = scaled_dot_product_attention(
+            q_fre, k_fre, v_fre, None)     # B*c*D*T
+
+        scaled_attention_time = tf.transpose(scaled_attention_time,[0,2,3,1])
+        scaled_attention_fre = tf.transpose(scaled_attention_fre,[0,3,2,1])
+
+        out = tf.concat([scaled_attention_time,scaled_attention_fre],-1) # B*T*D*2c
+
+        out = self.ln(self.conv(out) + residual) # B*T*D*n
+
+        final_out = self.bnf1(self.final_conv1(out),training=training)
+        final_out = self.bnf2(self.final_conv2(final_out),training=training)
+
+        final_out = self.act(final_out + out)
+
+        return final_out
+
+
 class Encoder(tf.keras.layers.Layer):
     def __init__(self, num_layers, d_model, num_heads, dff, input_vocab_size, maximum_position_encoding, rate=0.1):
         super(Encoder, self).__init__()
@@ -186,13 +246,13 @@ class Encoder(tf.keras.layers.Layer):
         self.d_model = d_model
         self.num_layers = num_layers
 
-        self.downsample = tf.keras.layers.Conv1D(64, 3, 1, 'same', activation='tanh',
+        self.downsample = tf.keras.layers.Conv2D(64, 3, 1, 'same', activation='tanh',
                                                  kernel_initializer='glorot_normal')
         self.bn = tf.keras.layers.BatchNormalization()
-        self.downsample2 = tf.keras.layers.Conv1D(64, 3, 1, 'same', activation='tanh',
+        self.downsample2 = tf.keras.layers.Conv2D(64, 3, 1, 'same', activation='tanh',
                                                   kernel_initializer='glorot_normal')
         self.bn2 = tf.keras.layers.BatchNormalization()
-        self.downsample3 = tf.keras.layers.Conv1D(64, 3, 1, 'same', activation='tanh',
+        self.downsample3 = tf.keras.layers.Conv2D(64, 3, 1, 'same', activation='tanh',
                                                   kernel_initializer='glorot_normal')
         self.bn3 = tf.keras.layers.BatchNormalization()
 
@@ -202,6 +262,9 @@ class Encoder(tf.keras.layers.Layer):
                                                 self.d_model)
 
         self.linear = tf.keras.layers.Dense(d_model)
+
+        self.num_M = 2
+        self.TwoD_layers = [TwoD_Attention_layer(64, 64) for _ in range(self.num_M)]
 
         self.enc_layers = [EncoderLayer(d_model, num_heads, dff, rate)
                            for _ in range(num_layers)]
@@ -214,6 +277,12 @@ class Encoder(tf.keras.layers.Layer):
         x = self.bn(self.downsample(x))
         x = self.bn2(self.downsample2(x))
         x = self.bn3(self.downsample3(x))
+
+        for i in range(self.num_M):
+            x = self.TwoD_layers[i](x, training)
+
+        x = tf.reshape(x, (x.shape[0], x.shape[1], x.shape[2] * x.shape[3]))
+
         x = self.linear(x)
 
         x *= tf.math.sqrt(tf.cast(self.d_model, tf.float32))
